@@ -1,6 +1,7 @@
 #include "input_manager.h"
 
 #include <assert.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <SDL3/SDL.h>
@@ -13,6 +14,9 @@
 #include "shortcut_mod.h"
 #include "util/log.h"
 #include "util/sdl.h"
+
+static bool file_dialog_running;
+static int run_file_dialog(void *data);
 
 void
 sc_input_manager_init(struct sc_input_manager *im,
@@ -643,6 +647,17 @@ sc_input_manager_process_key(struct sc_input_manager *im,
                         open_hard_keyboard_settings(im);
                     }
                     return;
+                case SDLK_D:
+                    if (im->fp && !shift && !repeat && down
+                            && !file_dialog_running) {
+                        file_dialog_running = true;
+                        sc_thread t;
+                        if (!sc_thread_create(&t, run_file_dialog,
+                                              "scrcpy-filedlg", im)) {
+                            file_dialog_running = false;
+                        }
+                    }
+                    return;
             }
         }
 
@@ -1127,6 +1142,21 @@ is_apk(const char *file) {
     return ext && !strcmp(ext, ".apk");
 }
 
+// 将单个文件提交给 file_pusher（APK 安装，其他推送）
+static void
+sc_input_manager_push_file(struct sc_file_pusher *fp, char *file) {
+    enum sc_file_pusher_action action;
+    if (is_apk(file)) {
+        action = SC_FILE_PUSHER_ACTION_INSTALL_APK;
+    } else {
+        action = SC_FILE_PUSHER_ACTION_PUSH_FILE;
+    }
+    bool ok = sc_file_pusher_request(fp, action, file);
+    if (!ok) {
+        free(file);
+    }
+}
+
 static void
 sc_input_manager_process_file(struct sc_input_manager *im,
                               const SDL_DropEvent *event) {
@@ -1140,17 +1170,118 @@ sc_input_manager_process_file(struct sc_input_manager *im,
         LOG_OOM();
         return;
     }
+    sc_input_manager_push_file(im->fp, file);
+}
 
-    enum sc_file_pusher_action action;
-    if (is_apk(file)) {
-        action = SC_FILE_PUSHER_ACTION_INSTALL_APK;
-    } else {
-        action = SC_FILE_PUSHER_ACTION_PUSH_FILE;
+// zenity 文件选择线程：弹出对话框，用户选择的文件提交给 file_pusher
+static int
+run_file_dialog(void *data) {
+    struct sc_input_manager *im = data;
+    FILE *pipe = popen(
+        "zenity --file-selection --multiple --separator=$'\\n' "
+        "--title='选择文件推送到设备（APK 自动安装）' 2>/dev/null",
+        "r");
+    if (!pipe) {
+        LOGE("Failed to open zenity file dialog");
+        file_dialog_running = false;
+        return 1;
     }
-    bool ok = sc_file_pusher_request(im->fp, action, file);
-    if (!ok) {
-        free(file);
+
+    char line[4096];
+    while (fgets(line, sizeof(line), pipe)) {
+        size_t len = strlen(line);
+        if (len > 0 && line[len - 1] == '\n') {
+            line[len - 1] = '\0';
+        }
+        if (line[0] == '\0') {
+            continue;
+        }
+        char *file = strdup(line);
+        if (!file) {
+            LOG_OOM();
+            continue;
+        }
+        LOGI("File dialog selected: %s", file);
+        sc_input_manager_push_file(im->fp, file);
     }
+
+    pclose(pipe);
+    file_dialog_running = false;
+    return 0;
+}
+
+// 处理 DDE 文件管理器的 DROPTEXT 事件
+// dde-file-manager 通过 XDND 发送 DROPTEXT 而非 DROPFILE，
+// 尝试从 X11 selection 读取 text/uri-list 格式获取实际文件路径
+static void
+sc_input_manager_process_drop_text(struct sc_input_manager *im,
+                                   const SDL_DropEvent *event) {
+    const char *text = event->data;
+    if (!text) {
+        return;
+    }
+
+    // 如果文本本身是文件路径（以 / 开头），直接使用
+    if (text[0] == '/') {
+        char *file = strdup(text);
+        SDL_free(event->data);
+        if (file) {
+            LOGI("Drop text as file path: %s", file);
+            sc_input_manager_push_file(im->fp, file);
+        }
+        return;
+    }
+
+    // 如果是 file:// URI，提取路径
+    if (!strncmp(text, "file://", 7)) {
+        char *file = strdup(text + 7);
+        SDL_free(event->data);
+        if (file) {
+            LOGI("Drop text as file URI: %s", file);
+            sc_input_manager_push_file(im->fp, file);
+        }
+        return;
+    }
+
+    // DDE 发送 "dde-fileManager" 等无用文本时，尝试从 xclip 读取剪贴板
+    LOGD("Drop text not a file path: '%s', trying xclip...", text);
+    SDL_free(event->data);
+
+    FILE *pipe = popen(
+        "xclip -selection clipboard -t text/uri-list -o 2>/dev/null",
+        "r");
+    if (!pipe) {
+        return;
+    }
+
+    char line[4096];
+    while (fgets(line, sizeof(line), pipe)) {
+        size_t len = strlen(line);
+        if (len > 0 && line[len - 1] == '\n') {
+            line[len - 1] = '\0';
+        }
+        if (len > 0 && line[len - 1] == '\r') {
+            line[len - 1] = '\0';
+        }
+        if (line[0] == '\0' || line[0] == '#') {
+            continue;
+        }
+
+        const char *path = line;
+        if (!strncmp(path, "file://", 7)) {
+            path = line + 7;
+        }
+        if (path[0] != '/') {
+            continue;
+        }
+
+        char *file = strdup(path);
+        if (file) {
+            LOGI("Drop text via xclip: %s", file);
+            sc_input_manager_push_file(im->fp, file);
+        }
+    }
+    pclose(pipe);
 }
 
 static void
@@ -1203,6 +1334,14 @@ sc_input_manager_handle_event(struct sc_input_manager *im,
         case SDL_EVENT_DROP_FILE:
             sc_input_manager_process_file(im, &event->drop);
             break;
+        case SDL_EVENT_DROP_TEXT: {
+            if (im->camera || !im->controller || im->disconnected
+                    || !im->fp) {
+                break;
+            }
+            sc_input_manager_process_drop_text(im, &event->drop);
+            break;
+        }
         case SC_EVENT_DEVICE_DISCONNECTED:
             sc_input_manager_on_device_disconnected(im);
             break;
