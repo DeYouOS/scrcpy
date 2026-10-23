@@ -38,10 +38,26 @@ sc_screen_on_stats(struct sc_fps_counter *counter,
         snprintf(bitrate_str, sizeof(bitrate_str), "%.0f Kbps", kbps);
     }
 
-    snprintf(screen->stats_title, sizeof(screen->stats_title),
-             "%s | %u fps | %s",
-             screen->base_title ? screen->base_title : "scrcpy",
-             fps, bitrate_str);
+    // 读取 file_pusher 的操作状态（线程安全）
+    char file_status[256] = "";
+    struct sc_file_pusher *fp = screen->im.fp;
+    if (fp) {
+        sc_mutex_lock(&fp->status_mutex);
+        memcpy(file_status, fp->status, sizeof(file_status));
+        sc_mutex_unlock(&fp->status_mutex);
+    }
+
+    if (file_status[0]) {
+        snprintf(screen->stats_title, sizeof(screen->stats_title),
+                 "%s | %u fps | %s | %s",
+                 screen->base_title ? screen->base_title : "scrcpy",
+                 fps, bitrate_str, file_status);
+    } else {
+        snprintf(screen->stats_title, sizeof(screen->stats_title),
+                 "%s | %u fps | %s",
+                 screen->base_title ? screen->base_title : "scrcpy",
+                 fps, bitrate_str);
+    }
 
     sc_run_on_main_thread(sc_screen_update_stats_title, screen, false);
 }

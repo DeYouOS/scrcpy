@@ -1,6 +1,8 @@
 #include "file_pusher.h"
 
 #include <assert.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -8,8 +10,24 @@
 #include "control_msg.h"
 #include "controller.h"
 #include "util/log.h"
+#include "util/tick.h"
 
 #define DEFAULT_PUSH_TARGET "/sdcard/Download/"
+
+// 设置 file_pusher 的状态文本（线程安全），供标题栏读取显示
+static void
+sc_file_pusher_set_status(struct sc_file_pusher *fp, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    sc_mutex_lock(&fp->status_mutex);
+    if (fmt) {
+        vsnprintf(fp->status, sizeof(fp->status), fmt, ap);
+    } else {
+        fp->status[0] = '\0';
+    }
+    sc_mutex_unlock(&fp->status_mutex);
+    va_end(ap);
+}
 
 static void
 sc_file_pusher_request_destroy(struct sc_file_pusher_request *req) {
@@ -42,19 +60,28 @@ sc_file_pusher_init(struct sc_file_pusher *fp, struct sc_controller *controller,
         return false;
     }
 
-    fp->serial = strdup(serial);
-    if (!fp->serial) {
-        LOG_OOM();
+    ok = sc_mutex_init(&fp->status_mutex);
+    if (!ok) {
         sc_intr_destroy(&fp->intr);
         sc_cond_destroy(&fp->event_cond);
         sc_mutex_destroy(&fp->mutex);
         return false;
     }
 
-    // lazy initialization
+    fp->serial = strdup(serial);
+    if (!fp->serial) {
+        LOG_OOM();
+        sc_mutex_destroy(&fp->status_mutex);
+        sc_intr_destroy(&fp->intr);
+        sc_cond_destroy(&fp->event_cond);
+        sc_mutex_destroy(&fp->mutex);
+        return false;
+    }
+
     fp->initialized = false;
 
     fp->stopped = false;
+    fp->status[0] = '\0';
 
     fp->push_target = push_target ? push_target : DEFAULT_PUSH_TARGET;
     fp->controller = controller;
@@ -66,6 +93,7 @@ void
 sc_file_pusher_destroy(struct sc_file_pusher *fp) {
     sc_cond_destroy(&fp->event_cond);
     sc_mutex_destroy(&fp->mutex);
+    sc_mutex_destroy(&fp->status_mutex);
     sc_intr_destroy(&fp->intr);
     free(fp->serial);
 
@@ -157,24 +185,49 @@ run_file_pusher(void *data) {
         struct sc_file_pusher_request req = sc_vecdeque_pop(&fp->queue);
         sc_mutex_unlock(&fp->mutex);
 
+        // 从完整路径中提取文件名用于状态显示
+        const char *filename = strrchr(req.file, '/');
+        if (!filename) {
+            filename = strrchr(req.file, '\\');
+        }
+        filename = filename ? filename + 1 : req.file;
+
         if (req.action == SC_FILE_PUSHER_ACTION_INSTALL_APK) {
             LOGI("Installing %s...", req.file);
+            sc_file_pusher_set_status(fp, "⏳ 安装 %s ...", filename);
             bool ok = sc_adb_install(intr, serial, req.file, 0);
             if (ok) {
                 LOGI("%s successfully installed", req.file);
+                sc_file_pusher_set_status(fp, "✅ %s 已安装", filename);
             } else {
                 LOGE("Failed to install %s", req.file);
+                sc_file_pusher_set_status(fp, "❌ %s 安装失败", filename);
             }
         } else {
             LOGI("Pushing %s...", req.file);
+            sc_file_pusher_set_status(fp, "⏳ 推送 %s ...", filename);
             bool ok = sc_adb_push(intr, serial, req.file, push_target, 0);
             if (ok) {
                 LOGI("%s successfully pushed to %s", req.file, push_target);
+                sc_file_pusher_set_status(fp, "✅ %s 已推送", filename);
                 request_scan_file(fp); // any error already logged
             } else {
                 LOGE("Failed to push %s to %s", req.file, push_target);
+                sc_file_pusher_set_status(fp, "❌ %s 推送失败", filename);
             }
         }
+
+        // 结果状态保持 3 秒后清除（若无新任务到达）
+        sc_tick deadline = sc_tick_now() + SC_TICK_FREQ * 3;
+        sc_mutex_lock(&fp->mutex);
+        while (!fp->stopped && sc_vecdeque_is_empty(&fp->queue)
+                && sc_tick_now() < deadline) {
+            sc_cond_timedwait(&fp->event_cond, &fp->mutex, deadline);
+        }
+        if (sc_vecdeque_is_empty(&fp->queue)) {
+            sc_file_pusher_set_status(fp, NULL);
+        }
+        sc_mutex_unlock(&fp->mutex);
 
         sc_file_pusher_request_destroy(&req);
     }

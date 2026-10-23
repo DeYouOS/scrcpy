@@ -35,6 +35,11 @@ struct sc_file_pusher {
     struct sc_file_pusher_request_queue queue;
 
     struct sc_intr intr;
+
+    // 文件操作状态（拖放反馈），供标题栏显示
+    // 由 file_pusher 线程写入，由主线程（通过 fps_counter 回调）读取
+    sc_mutex status_mutex;
+    char status[256]; // 空字符串表示无操作
 };
 
 bool
