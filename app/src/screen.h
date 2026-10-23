@@ -102,6 +102,10 @@ struct sc_screen {
     bool disconnect_started;
     struct sc_disconnect disconnect;
 
+    // 标题栏统计信息（由 fps_counter 回调通过 SDL 事件投递更新）
+    const char *base_title;
+    char stats_title[256];
+
     SDL_Texture *icon_tex;
     // render icon rather than frame?
     bool is_icon_active;

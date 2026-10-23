@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <termios.h>
+#include <unistd.h>
 
 #include "adb/adb_device.h"
 #include "adb/adb_parser.h"
@@ -587,7 +589,7 @@ sc_adb_select_device(struct sc_intr *intr,
         return false;
     }
 
-    size_t sel_idx; // index of the single matching device if sel_count == 1
+    size_t sel_idx = 0; // index of the single matching device if sel_count == 1
     size_t sel_count =
         sc_adb_devices_select(vec.data, vec.size, selector, &sel_idx);
 
@@ -618,34 +620,190 @@ sc_adb_select_device(struct sc_intr *intr,
     }
 
     if (sel_count > 1) {
-        switch (selector->type) {
-            case SC_ADB_DEVICE_SELECT_ALL:
-                LOGE("Multiple (%" SC_PRIsizet ") ADB devices:", sel_count);
-                break;
-            case SC_ADB_DEVICE_SELECT_SERIAL:
-                assert(selector->serial);
-                LOGE("Multiple (%" SC_PRIsizet ") ADB devices with serial %s:",
-                     sel_count, selector->serial);
-                break;
-            case SC_ADB_DEVICE_SELECT_USB:
-                LOGE("Multiple (%" SC_PRIsizet ") ADB devices over USB:",
-                     sel_count);
-                break;
-            case SC_ADB_DEVICE_SELECT_TCPIP:
-                LOGE("Multiple (%" SC_PRIsizet ") ADB devices over TCP/IP:",
-                     sel_count);
-                break;
-            default:
-                assert(!"Unexpected selector type");
-                break;
+        // 如果用户没有通过 --serial 指定设备，提供交互式选择
+        // 需要终端支持（isatty），图标启动等非终端环境用 zenity 弹窗
+        bool has_tty = isatty(STDIN_FILENO);
+        if (selector->type == SC_ADB_DEVICE_SELECT_ALL && sel_count <= 9
+                && has_tty) {
+            // 打印带编号的设备列表
+            fprintf(stderr, "\n");
+            fprintf(stderr, "  检测到 %zu 台 ADB 设备，请选择:\n", sel_count);
+            fprintf(stderr, "\n");
+
+            // 收集匹配的设备索引
+            size_t sel_indices[9];
+            size_t j = 0;
+            for (size_t i = 0; i < vec.size && j < sel_count; ++i) {
+                if (vec.data[i].selected) {
+                    struct sc_adb_device *d = &vec.data[i];
+                    bool is_usb = sc_adb_device_get_type(d->serial)
+                                  == SC_ADB_DEVICE_TYPE_USB;
+                    const char *type = is_usb ? "USB" : "TCP";
+                    fprintf(stderr, "    [%zu] %s  %-20s  %s\n",
+                            j + 1, type, d->serial,
+                            d->model ? d->model : "(unknown)");
+                    sel_indices[j] = i;
+                    ++j;
+                }
+            }
+
+            fprintf(stderr, "\n");
+            fprintf(stderr, "  按数字键 1-%zu 选择（按 q 退出）: ", sel_count);
+            fflush(stderr);
+
+            // 设置终端为 raw 模式，读取单个按键（无需回车）
+            struct termios oldt, newt;
+            tcgetattr(STDIN_FILENO, &oldt);
+            newt = oldt;
+            newt.c_lflag &= ~(ICANON | ECHO);  // 关闭行缓冲和回显
+            newt.c_cc[VMIN] = 1;
+            newt.c_cc[VTIME] = 0;
+            tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+
+            int ch = getchar();
+
+            // 恢复终端设置
+            tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+
+            fprintf(stderr, "\n");
+
+            if (ch == 'q' || ch == 'Q' || ch == 27) { // 27 = ESC
+                LOGI("用户取消选择");
+                sc_adb_devices_destroy(&vec);
+                return false;
+            }
+
+            size_t choice = (size_t)(ch - '0');
+            if (choice < 1 || choice > sel_count) {
+                LOGE("无效选择: '%c'", (char)ch);
+                sc_adb_devices_destroy(&vec);
+                return false;
+            }
+
+            sel_idx = sel_indices[choice - 1];
+            sel_count = 1; // 标记为已选择单个设备，进入后续处理
+            // 更新 selected 标记
+            for (size_t i = 0; i < vec.size; ++i) {
+                vec.data[i].selected = (i == sel_idx);
+            }
+        } else if (!has_tty
+                && selector->type == SC_ADB_DEVICE_SELECT_ALL) {
+            // 非终端环境（桌面图标启动），通过 zenity 弹窗选择设备
+            // 构造 zenity --list 命令，每行一条设备信息
+            char cmd[2048];
+            int off = snprintf(cmd, sizeof(cmd),
+                "zenity --list --title='scrcpy 设备选择' "
+                "--text='检测到多台设备，请选择：' "
+                "--column='序号' --column='类型' "
+                "--column='序列号' --column='型号' "
+                "--print-column=3 --hide-column=1 ");
+
+            size_t j = 0;
+            for (size_t i = 0; i < vec.size && j < sel_count; ++i) {
+                if (vec.data[i].selected) {
+                    struct sc_adb_device *d = &vec.data[i];
+                    bool is_usb = sc_adb_device_get_type(d->serial)
+                                  == SC_ADB_DEVICE_TYPE_USB;
+                    off += snprintf(cmd + off, sizeof(cmd) - off,
+                        "'%zu' '%s' '%s' '%s' ",
+                        j + 1,
+                        is_usb ? "USB" : "TCP",
+                        d->serial,
+                        d->model ? d->model : "(unknown)");
+                    ++j;
+                }
+            }
+
+            FILE *fp = popen(cmd, "r");
+            if (!fp) {
+                LOGE("无法启动设备选择对话框");
+                sc_adb_devices_destroy(&vec);
+                return false;
+            }
+
+            char result[256] = {0};
+            if (!fgets(result, sizeof(result), fp)) {
+                result[0] = '\0';
+            }
+            int status = pclose(fp);
+
+            // 去掉末尾换行
+            size_t len = strlen(result);
+            if (len > 0 && result[len - 1] == '\n') {
+                result[len - 1] = '\0';
+            }
+
+            if (status != 0 || result[0] == '\0') {
+                // zenity 弹窗失败或用户取消，自动选择第一台设备
+                LOGI("设备选择对话框未返回结果，自动选择第一台设备");
+                for (size_t i = 0; i < vec.size; ++i) {
+                    if (vec.data[i].selected) {
+                        sel_idx = i;
+                        sel_count = 1;
+                        for (size_t k = 0; k < vec.size; ++k) {
+                            vec.data[k].selected = (k == sel_idx);
+                        }
+                        goto device_selected;
+                    }
+                }
+                // 不应走到这里
+                sc_adb_devices_destroy(&vec);
+                return false;
+            }
+
+            // 根据返回的序列号匹配设备
+            bool found = false;
+            for (size_t i = 0; i < vec.size; ++i) {
+                if (vec.data[i].selected
+                        && !strcmp(vec.data[i].serial, result)) {
+                    sel_idx = i;
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                LOGE("未找到选中的设备: %s", result);
+                sc_adb_devices_destroy(&vec);
+                return false;
+            }
+
+            sel_count = 1;
+            for (size_t i = 0; i < vec.size; ++i) {
+                vec.data[i].selected = (i == sel_idx);
+            }
+        } else {
+            // 原有逻辑：设备太多或指定了筛选条件但匹配多个
+            switch (selector->type) {
+                case SC_ADB_DEVICE_SELECT_ALL:
+                    LOGE("Multiple (%" SC_PRIsizet ") ADB devices:", sel_count);
+                    break;
+                case SC_ADB_DEVICE_SELECT_SERIAL:
+                    assert(selector->serial);
+                    LOGE("Multiple (%" SC_PRIsizet ") ADB devices with serial %s:",
+                         sel_count, selector->serial);
+                    break;
+                case SC_ADB_DEVICE_SELECT_USB:
+                    LOGE("Multiple (%" SC_PRIsizet ") ADB devices over USB:",
+                         sel_count);
+                    break;
+                case SC_ADB_DEVICE_SELECT_TCPIP:
+                    LOGE("Multiple (%" SC_PRIsizet ") ADB devices over TCP/IP:",
+                         sel_count);
+                    break;
+                default:
+                    assert(!"Unexpected selector type");
+                    break;
+            }
+            sc_adb_devices_log(SC_LOG_LEVEL_ERROR, vec.data, vec.size);
+            LOGE("Select a device via -s (--serial), -d (--select-usb) or -e "
+                 "(--select-tcpip)");
+            sc_adb_devices_destroy(&vec);
+            return false;
         }
-        sc_adb_devices_log(SC_LOG_LEVEL_ERROR, vec.data, vec.size);
-        LOGE("Select a device via -s (--serial), -d (--select-usb) or -e "
-             "(--select-tcpip)");
-        sc_adb_devices_destroy(&vec);
-        return false;
     }
 
+    device_selected:
     assert(sel_count == 1); // sel_idx is valid only if sel_count == 1
     struct sc_adb_device *device = &vec.data[sel_idx];
 

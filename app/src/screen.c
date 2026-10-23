@@ -1,6 +1,7 @@
 #include "screen.h"
 
 #include <assert.h>
+#include <stdio.h>
 #include <string.h>
 #include <SDL3/SDL.h>
 
@@ -11,6 +12,39 @@
 #include "util/sdl.h"
 
 #define DISPLAY_MARGINS 96
+
+// 主线程执行：用 stats_title 更新窗口标题
+static void
+sc_screen_update_stats_title(void *userdata) {
+    struct sc_screen *screen = userdata;
+    SDL_SetWindowTitle(screen->window, screen->stats_title);
+}
+
+// fps_counter 回调（fps_counter 线程）：格式化统计信息，投递到主线程更新标题
+static void
+sc_screen_on_stats(struct sc_fps_counter *counter,
+                   unsigned fps, unsigned skipped,
+                   uint64_t bytes_per_sec, void *userdata) {
+    (void) counter;
+    (void) skipped;
+    struct sc_screen *screen = userdata;
+
+    // 格式化码率：>= 1Mbps 显示 x.x Mbps，否则显示 xxx Kbps
+    char bitrate_str[32];
+    double kbps = bytes_per_sec * 8.0 / 1000.0;
+    if (kbps >= 1000.0) {
+        snprintf(bitrate_str, sizeof(bitrate_str), "%.1f Mbps", kbps / 1000.0);
+    } else {
+        snprintf(bitrate_str, sizeof(bitrate_str), "%.0f Kbps", kbps);
+    }
+
+    snprintf(screen->stats_title, sizeof(screen->stats_title),
+             "%s | %u fps | %s",
+             screen->base_title ? screen->base_title : "scrcpy",
+             fps, bitrate_str);
+
+    sc_run_on_main_thread(sc_screen_update_stats_title, screen, false);
+}
 
 #define DOWNCAST(SINK) container_of(SINK, struct sc_screen, frame_sink)
 
@@ -564,6 +598,10 @@ sc_screen_init(struct sc_screen *screen,
         goto error_destroy_frame_buffer;
     }
 
+    screen->base_title = params->window_title;
+    screen->fps_counter.on_stats = sc_screen_on_stats;
+    screen->fps_counter.on_stats_userdata = screen;
+
     if (screen->video) {
         screen->orientation = params->orientation;
         if (screen->orientation != SC_ORIENTATION_0) {
@@ -801,9 +839,8 @@ sc_screen_show_initial_window(struct sc_screen *screen) {
         sc_screen_toggle_fullscreen(screen);
     }
 
-    if (screen->req.start_fps_counter) {
-        sc_fps_counter_start(&screen->fps_counter);
-    }
+    // 始终启动 fps_counter 以驱动标题栏统计显示
+    sc_fps_counter_start(&screen->fps_counter);
 
     screen->window_shown = true;
     sc_sdl_show_window(screen->window);

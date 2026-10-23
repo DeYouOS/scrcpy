@@ -6,6 +6,7 @@
 #include <stdbool.h>
 
 #include "trait/packet_source.h"
+#include "fps_counter.h"
 #include "util/net.h"
 #include "util/thread.h"
 
@@ -17,6 +18,8 @@ struct sc_demuxer {
 
     sc_socket socket;
     sc_thread thread;
+
+    struct sc_fps_counter *fps_counter; // 可选，非 NULL 时累加网络字节统计
 
     const struct sc_demuxer_callbacks *cbs;
     void *cbs_userdata;

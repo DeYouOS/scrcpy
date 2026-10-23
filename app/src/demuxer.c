@@ -313,6 +313,11 @@ run_demuxer(void *data) {
                 break;
             }
 
+            if (demuxer->fps_counter) {
+                sc_fps_counter_add_bytes(demuxer->fps_counter,
+                                         SC_PACKET_HEADER_SIZE + packet->size);
+            }
+
             if (must_merge_config_packet) {
                 // Prepend any config packet to the next media packet
                 ok = sc_packet_merger_merge(&merger, packet);
@@ -364,6 +369,7 @@ sc_demuxer_init(struct sc_demuxer *demuxer, const char *name, sc_socket socket,
 
     demuxer->cbs = cbs;
     demuxer->cbs_userdata = cbs_userdata;
+    demuxer->fps_counter = NULL;
 }
 
 bool

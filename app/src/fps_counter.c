@@ -22,7 +22,8 @@ sc_fps_counter_init(struct sc_fps_counter *counter) {
 
     counter->thread_started = false;
     atomic_init(&counter->started, 0);
-    // no need to initialize the other fields, they are unused until started
+    counter->on_stats = NULL;
+    counter->on_stats_userdata = NULL;
 
     return true;
 }
@@ -48,11 +49,19 @@ static void
 display_fps(struct sc_fps_counter *counter) {
     unsigned rendered_per_second =
         counter->nr_rendered * SC_TICK_FREQ / SC_FPS_COUNTER_INTERVAL;
+    uint64_t bytes_per_second =
+        counter->nr_bytes * SC_TICK_FREQ / SC_FPS_COUNTER_INTERVAL;
+
     if (counter->nr_skipped) {
         LOGI("%u fps (+%u frames skipped)", rendered_per_second,
                                             counter->nr_skipped);
     } else {
         LOGI("%u fps", rendered_per_second);
+    }
+
+    if (counter->on_stats) {
+        counter->on_stats(counter, rendered_per_second, counter->nr_skipped,
+                          bytes_per_second, counter->on_stats_userdata);
     }
 }
 
@@ -66,6 +75,7 @@ check_interval_expired(struct sc_fps_counter *counter, sc_tick now) {
     display_fps(counter);
     counter->nr_rendered = 0;
     counter->nr_skipped = 0;
+    counter->nr_bytes = 0;
     // add a multiple of the interval
     uint32_t elapsed_slices =
         (now - counter->next_timestamp) / SC_FPS_COUNTER_INTERVAL + 1;
@@ -101,6 +111,7 @@ sc_fps_counter_start(struct sc_fps_counter *counter) {
     counter->next_timestamp = sc_tick_now() + SC_FPS_COUNTER_INTERVAL;
     counter->nr_rendered = 0;
     counter->nr_skipped = 0;
+    counter->nr_bytes = 0;
     sc_mutex_unlock(&counter->mutex);
 
     set_started(counter, true);
@@ -182,5 +193,16 @@ sc_fps_counter_add_skipped_frame(struct sc_fps_counter *counter) {
     sc_tick now = sc_tick_now();
     check_interval_expired(counter, now);
     ++counter->nr_skipped;
+    sc_mutex_unlock(&counter->mutex);
+}
+
+void
+sc_fps_counter_add_bytes(struct sc_fps_counter *counter, uint64_t bytes) {
+    if (!is_started(counter)) {
+        return;
+    }
+
+    sc_mutex_lock(&counter->mutex);
+    counter->nr_bytes += bytes;
     sc_mutex_unlock(&counter->mutex);
 }

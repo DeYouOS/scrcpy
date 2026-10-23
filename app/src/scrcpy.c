@@ -848,6 +848,10 @@ aoa_complete:
             goto end;
         }
         screen_initialized = true;
+
+        if (options->video) {
+            s->video_demuxer.fps_counter = &s->screen.fps_counter;
+        }
     }
 
     bool needs_video_decoder = options->video_playback;
