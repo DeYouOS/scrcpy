@@ -446,6 +446,7 @@ scrcpy(struct scrcpy_options *options) {
         .audio_bit_rate = options->audio_bit_rate,
         .max_fps = options->max_fps,
         .repeat_frame_delay = options->repeat_frame_delay,
+        .direct_tcp_port = 0,
         .angle = options->angle,
         .screen_off_timeout = options->screen_off_timeout,
         .capture_orientation = options->capture_orientation,

@@ -314,6 +314,9 @@ execute_server(struct sc_server *server,
         VALIDATE_STRING(params->repeat_frame_delay);
         ADD_PARAM("repeat_frame_delay=%s", params->repeat_frame_delay);
     }
+    if (params->direct_tcp_port) {
+        ADD_PARAM("direct_tcp_port=%" PRIu16, params->direct_tcp_port);
+    }
     if (params->min_size_alignment != 1) {
         ADD_PARAM("min_size_alignment=%" PRIu8, params->min_size_alignment);
     }
@@ -543,6 +546,22 @@ connect_to_server(struct sc_server *server, unsigned attempts, sc_tick delay,
     return SC_SOCKET_NONE;
 }
 
+static sc_socket
+connect_direct_socket(struct sc_server *server, uint32_t host, uint16_t port) {
+    sc_socket socket = net_socket();
+    if (socket == SC_SOCKET_NONE) {
+        return SC_SOCKET_NONE;
+    }
+
+    bool ok = net_connect_intr(&server->intr, socket, host, port);
+    if (!ok) {
+        net_close(socket);
+        return SC_SOCKET_NONE;
+    }
+
+    return socket;
+}
+
 bool
 sc_server_init(struct sc_server *server, const struct sc_server_params *params,
               const struct sc_server_callbacks *cbs, void *cbs_userdata) {
@@ -583,6 +602,8 @@ sc_server_init(struct sc_server *server, const struct sc_server_params *params,
     server->video_socket = SC_SOCKET_NONE;
     server->audio_socket = SC_SOCKET_NONE;
     server->control_socket = SC_SOCKET_NONE;
+    server->direct_tcp_host = 0;
+    server->direct_tcp_port = 0;
 
     sc_adb_tunnel_init(&server->tunnel);
 
@@ -630,6 +651,92 @@ sc_server_connect_to(struct sc_server *server, struct sc_server_info *info) {
     sc_socket video_socket = SC_SOCKET_NONE;
     sc_socket audio_socket = SC_SOCKET_NONE;
     sc_socket control_socket = SC_SOCKET_NONE;
+
+    if (server->direct_tcp_host && server->direct_tcp_port) {
+        LOGI("Direct TCP: trying port %" PRIu16 "...", server->direct_tcp_port);
+
+        bool direct_ok = true;
+        bool first_stream = true;
+        if (video) {
+            video_socket = connect_to_server(server, 4, SC_TICK_FROM_MS(500),
+                                             server->direct_tcp_host,
+                                             server->direct_tcp_port);
+            if (video_socket == SC_SOCKET_NONE) {
+                direct_ok = false;
+            }
+            first_stream = false;
+        }
+
+        if (direct_ok && audio) {
+            if (first_stream) {
+                audio_socket = connect_to_server(server, 4, SC_TICK_FROM_MS(500),
+                                                 server->direct_tcp_host,
+                                                 server->direct_tcp_port);
+            } else {
+                audio_socket = connect_direct_socket(server,
+                                                     server->direct_tcp_host,
+                                                     server->direct_tcp_port);
+            }
+            if (audio_socket == SC_SOCKET_NONE) {
+                direct_ok = false;
+            }
+            first_stream = false;
+        }
+
+        if (direct_ok && control) {
+            if (first_stream) {
+                control_socket = connect_to_server(server, 4,
+                                                   SC_TICK_FROM_MS(500),
+                                                   server->direct_tcp_host,
+                                                   server->direct_tcp_port);
+            } else {
+                control_socket = connect_direct_socket(server,
+                                                       server->direct_tcp_host,
+                                                       server->direct_tcp_port);
+            }
+            if (control_socket == SC_SOCKET_NONE) {
+                direct_ok = false;
+            }
+            first_stream = false;
+        }
+
+        if (direct_ok && control_socket != SC_SOCKET_NONE) {
+            bool ok = net_set_tcp_nodelay(control_socket, true);
+            (void) ok;
+        }
+
+        if (direct_ok) {
+            sc_socket first_socket = video ? video_socket
+                                   : audio ? audio_socket
+                                           : control_socket;
+            bool ok = device_read_info(&server->intr, first_socket, info);
+            if (ok) {
+                sc_adb_tunnel_close(tunnel, &server->intr, serial,
+                                    server->device_socket_name);
+                server->video_socket = video_socket;
+                server->audio_socket = audio_socket;
+                server->control_socket = control_socket;
+                LOGI("Direct TCP connected");
+                return true;
+            }
+        }
+
+        if (video_socket != SC_SOCKET_NONE) {
+            net_close(video_socket);
+            video_socket = SC_SOCKET_NONE;
+        }
+        if (audio_socket != SC_SOCKET_NONE) {
+            net_close(audio_socket);
+            audio_socket = SC_SOCKET_NONE;
+        }
+        if (control_socket != SC_SOCKET_NONE) {
+            net_close(control_socket);
+            control_socket = SC_SOCKET_NONE;
+        }
+
+        LOGI("Direct TCP failed, falling back to ADB tunnel");
+    }
+
     if (!tunnel->forward) {
         if (video) {
             video_socket =
@@ -1075,6 +1182,27 @@ run_server(void *data) {
         }
         if (!p->repeat_frame_delay) {
             p->repeat_frame_delay = "500";
+        }
+
+        char host[256];
+        const char *colon = strrchr(serial, ':');
+        if (colon) {
+            size_t host_len = (size_t) (colon - serial);
+            if (host_len < sizeof(host)) {
+                memcpy(host, serial, host_len);
+                host[host_len] = '\0';
+
+                if (net_parse_ipv4(host, &server->direct_tcp_host)) {
+                    char *endptr;
+                    unsigned long adb_port = strtoul(colon + 1, &endptr, 10);
+                    if (!*endptr && adb_port < 0xFFFF) {
+                        if (!p->direct_tcp_port) {
+                            p->direct_tcp_port = (uint16_t) (adb_port + 1);
+                        }
+                        server->direct_tcp_port = p->direct_tcp_port;
+                    }
+                }
+            }
         }
 
         if (p->audio) {

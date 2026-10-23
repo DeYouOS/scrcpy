@@ -46,6 +46,7 @@ struct sc_server_params {
     uint32_t audio_bit_rate;
     const char *max_fps; // float to be parsed by the server
     const char *repeat_frame_delay; // 静止帧重复延迟，整数毫秒，由服务端解析
+    uint16_t direct_tcp_port;
     const char *angle; // float to be parsed by the server
     sc_tick screen_off_timeout;
     enum sc_orientation capture_orientation;
@@ -99,6 +100,9 @@ struct sc_server {
     sc_socket video_socket;
     sc_socket audio_socket;
     sc_socket control_socket;
+
+    uint32_t direct_tcp_host;
+    uint16_t direct_tcp_port;
 
     const struct sc_server_callbacks *cbs;
     void *cbs_userdata;

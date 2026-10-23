@@ -102,7 +102,14 @@ public final class Server {
 
         List<AsyncProcessor> asyncProcessors = new ArrayList<>();
 
-        DesktopConnection connection = DesktopConnection.open(scid, tunnelForward, video, audio, control, sendDummyByte);
+        DesktopConnection connection = null;
+        int directTcpPort = options.getDirectTcpPort();
+        if (directTcpPort > 0) {
+            connection = DesktopConnection.openDirectTcp(directTcpPort, video, audio, control, sendDummyByte);
+        }
+        if (connection == null) {
+            connection = DesktopConnection.open(scid, tunnelForward, video, audio, control, sendDummyByte);
+        }
         try {
             if (options.getSendDeviceMeta()) {
                 connection.sendDeviceMeta(Device.getDeviceName());

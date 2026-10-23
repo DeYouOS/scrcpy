@@ -37,6 +37,7 @@ public class Options {
     private int audioBitRate = 128000;
     private float maxFps;
     private int repeatFrameDelay = 100; // 静止帧重复延迟，默认 100ms
+    private int directTcpPort;
     private float angle;
     private boolean tunnelForward;
     private Rect crop;
@@ -146,6 +147,10 @@ public class Options {
 
     public int getRepeatFrameDelay() {
         return repeatFrameDelay;
+    }
+
+    public int getDirectTcpPort() {
+        return directTcpPort;
     }
 
     public float getAngle() {
@@ -415,6 +420,9 @@ public class Options {
                     break;
                 case "repeat_frame_delay":
                     options.repeatFrameDelay = Integer.parseInt(value);
+                    break;
+                case "direct_tcp_port":
+                    options.directTcpPort = Integer.parseInt(value);
                     break;
                 case "angle":
                     options.angle = parseFloat("angle", value);
