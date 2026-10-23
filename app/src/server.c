@@ -1076,9 +1076,7 @@ run_server(void *data) {
         if (!p->repeat_frame_delay) {
             p->repeat_frame_delay = "500";
         }
-        if (p->clipboard_autosync) {
-            p->clipboard_autosync = false;
-        }
+
         if (p->audio) {
             p->audio = false;
             LOGI("TCP/IP 模式已自动关闭音频");
