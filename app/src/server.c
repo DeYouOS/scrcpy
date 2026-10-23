@@ -309,6 +309,10 @@ execute_server(struct sc_server *server,
         VALIDATE_STRING(params->max_fps);
         ADD_PARAM("max_fps=%s", params->max_fps);
     }
+    if (params->repeat_frame_delay) {
+        VALIDATE_STRING(params->repeat_frame_delay);
+        ADD_PARAM("repeat_frame_delay=%s", params->repeat_frame_delay);
+    }
     if (params->min_size_alignment != 1) {
         ADD_PARAM("min_size_alignment=%" PRIu8, params->min_size_alignment);
     }

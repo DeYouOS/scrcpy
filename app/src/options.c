@@ -55,6 +55,7 @@ const struct scrcpy_options scrcpy_options_default = {
     .video_bit_rate = 0,
     .audio_bit_rate = 0,
     .max_fps = NULL,
+    .repeat_frame_delay = NULL,
     .capture_orientation = SC_ORIENTATION_0,
     .capture_orientation_lock = SC_ORIENTATION_UNLOCKED,
     .display_orientation = SC_ORIENTATION_0,

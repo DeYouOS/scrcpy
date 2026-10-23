@@ -36,6 +36,7 @@ public class Options {
     private int videoBitRate = 8000000;
     private int audioBitRate = 128000;
     private float maxFps;
+    private int repeatFrameDelay = 100; // 静止帧重复延迟，默认 100ms
     private float angle;
     private boolean tunnelForward;
     private Rect crop;
@@ -141,6 +142,10 @@ public class Options {
 
     public float getMaxFps() {
         return maxFps;
+    }
+
+    public int getRepeatFrameDelay() {
+        return repeatFrameDelay;
     }
 
     public float getAngle() {
@@ -407,6 +412,9 @@ public class Options {
                     break;
                 case "max_fps":
                     options.maxFps = parseFloat("max_fps", value);
+                    break;
+                case "repeat_frame_delay":
+                    options.repeatFrameDelay = Integer.parseInt(value);
                     break;
                 case "angle":
                     options.angle = parseFloat("angle", value);

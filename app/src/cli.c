@@ -112,6 +112,7 @@ enum {
     OPT_IGNORE_VIDEO_ENCODER_CONSTRAINTS,
     OPT_NO_TERMINAL_TITLE,
     OPT_HWDEC,
+    OPT_REPEAT_FRAME_DELAY, // 屏幕静止时重复前一帧的延迟（毫秒）
 };
 
 struct sc_option {
@@ -543,6 +544,14 @@ static const struct sc_option options[] = {
         .argdesc = "value",
         .text = "Limit the frame rate of screen capture (officially supported "
                 "since Android 10, but may work on earlier versions).",
+    },
+    {
+        .longopt_id = OPT_REPEAT_FRAME_DELAY,
+        .longopt = "repeat-frame-delay",
+        .argdesc = "delay",
+        .text = "Delay in milliseconds before repeating the previous frame when "
+                "the screen is static (default is 100). Increase to reduce "
+                "bandwidth usage on remote connections.",
     },
     {
         .longopt_id = OPT_MIN_SIZE_ALIGNMENT,
@@ -2602,6 +2611,9 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                 break;
             case OPT_MAX_FPS:
                 opts->max_fps = optarg;
+                break;
+            case OPT_REPEAT_FRAME_DELAY:
+                opts->repeat_frame_delay = optarg;
                 break;
             case 'm':
                 if (!parse_max_size(optarg, &opts->max_size)) {
