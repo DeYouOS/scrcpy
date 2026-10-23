@@ -17,6 +17,8 @@
 
 static bool file_dialog_running;
 static int run_file_dialog(void *data);
+static bool context_menu_running;
+static int run_context_menu(void *data);
 
 void
 sc_input_manager_init(struct sc_input_manager *im,
@@ -51,6 +53,9 @@ sc_input_manager_init(struct sc_input_manager *im,
     im->key_repeat = 0;
 
     im->next_sequence = 1; // 0 is reserved for SC_SEQUENCE_INVALID
+
+    im->right_click_down_time = 0;
+    im->right_click_pending = false;
 
     im->disconnected = false;
 }
@@ -895,7 +900,33 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
                 // ignore click
                 return;
             case SC_MOUSE_BINDING_BACK:
-                if (im->kp) {
+                // 右键长按检测：按下时记录时间，松开时判断
+                // 短按（<500ms）发送 BACK，长按（>=500ms）弹出上下文菜单
+                if (im->kp && event->button == SDL_BUTTON_RIGHT) {
+                    if (down) {
+                        im->right_click_down_time = sc_tick_now();
+                        im->right_click_pending = true;
+                    } else if (im->right_click_pending) {
+                        im->right_click_pending = false;
+                        sc_tick elapsed =
+                            sc_tick_now() - im->right_click_down_time;
+                        if (elapsed >= SC_TICK_FROM_MS(500)) {
+                            // 长按：弹出上下文菜单
+                            if (im->fp && !context_menu_running) {
+                                context_menu_running = true;
+                                sc_thread t;
+                                if (!sc_thread_create(&t, run_context_menu,
+                                        "scrcpy-ctxmenu", im)) {
+                                    context_menu_running = false;
+                                }
+                            }
+                        } else {
+                            // 短按：发送 BACK（模拟完整的 DOWN + UP）
+                            press_back_or_turn_screen_on(im, SC_ACTION_DOWN);
+                            press_back_or_turn_screen_on(im, SC_ACTION_UP);
+                        }
+                    }
+                } else if (im->kp) {
                     press_back_or_turn_screen_on(im, action);
                 }
                 return;
@@ -1207,6 +1238,96 @@ run_file_dialog(void *data) {
 
     pclose(pipe);
     file_dialog_running = false;
+    return 0;
+}
+
+// 右键长按上下文菜单线程：弹出 zenity 列表菜单，
+// 根据用户选择打开文件选择对话框执行对应操作
+static int
+run_context_menu(void *data) {
+    struct sc_input_manager *im = data;
+
+    FILE *pipe = popen(
+        "zenity --list --radiolist --title='scrcpy 操作菜单' "
+        "--column='' --column='操作' --column='说明' "
+        "--width=400 --height=300 "
+        "--hide-column=2 --print-column=2 "
+        "TRUE install_apk '安装 APK 到设备' "
+        "FALSE push_file '推送文件到设备 (存放到 /sdcard/Download/)' "
+        "2>/dev/null",
+        "r");
+    if (!pipe) {
+        LOGE("无法打开右键菜单");
+        context_menu_running = false;
+        return 1;
+    }
+
+    char choice[256] = {0};
+    if (!fgets(choice, sizeof(choice), pipe)) {
+        pclose(pipe);
+        context_menu_running = false;
+        return 0;
+    }
+    pclose(pipe);
+
+    size_t len = strlen(choice);
+    if (len > 0 && choice[len - 1] == '\n') {
+        choice[len - 1] = '\0';
+    }
+
+    if (choice[0] == '\0') {
+        context_menu_running = false;
+        return 0;
+    }
+
+    // 根据选择弹出对应的文件选择对话框
+    const char *zenity_cmd = NULL;
+    if (!strcmp(choice, "install_apk")) {
+        zenity_cmd =
+            "zenity --file-selection --multiple --separator=$'\\n' "
+            "--title='选择 APK 文件安装到设备' "
+            "--file-filter='APK 文件|*.apk' "
+            "--file-filter='所有文件|*' "
+            "2>/dev/null";
+    } else if (!strcmp(choice, "push_file")) {
+        zenity_cmd =
+            "zenity --file-selection --multiple --separator=$'\\n' "
+            "--title='选择文件推送到设备' "
+            "2>/dev/null";
+    }
+
+    if (!zenity_cmd) {
+        context_menu_running = false;
+        return 0;
+    }
+
+    FILE *file_pipe = popen(zenity_cmd, "r");
+    if (!file_pipe) {
+        LOGE("无法打开文件选择对话框");
+        context_menu_running = false;
+        return 1;
+    }
+
+    char line[4096];
+    while (fgets(line, sizeof(line), file_pipe)) {
+        len = strlen(line);
+        if (len > 0 && line[len - 1] == '\n') {
+            line[len - 1] = '\0';
+        }
+        if (line[0] == '\0') {
+            continue;
+        }
+        char *file = strdup(line);
+        if (!file) {
+            LOG_OOM();
+            continue;
+        }
+        LOGI("右键菜单选择文件: %s", file);
+        sc_input_manager_push_file(im->fp, file);
+    }
+
+    pclose(file_pipe);
+    context_menu_running = false;
     return 0;
 }
 

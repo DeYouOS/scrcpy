@@ -11,6 +11,7 @@
 #include "controller.h"
 #include "file_pusher.h"
 #include "options.h"
+#include "util/tick.h"
 #include "trait/gamepad_processor.h"
 #include "trait/key_processor.h"
 #include "trait/mouse_processor.h"
@@ -46,6 +47,11 @@ struct sc_input_manager {
     uint16_t last_mod;
 
     uint64_t next_sequence; // used for request acknowledgements
+
+    // 右键长按检测：按下时间戳和待处理标记
+    // 短按（<500ms）发送 BACK，长按（>=500ms）弹出上下文菜单
+    sc_tick right_click_down_time;
+    bool right_click_pending;
 
     bool disconnected;
 };
