@@ -8,6 +8,7 @@
 #include <sys/types.h>
 
 #include "adb/adb.h"
+#include "adb/adb_device.h"
 #include "util/env.h"
 #include "util/file.h"
 #include "util/log.h"
@@ -1055,6 +1056,34 @@ run_server(void *data) {
     const char *serial = server->serial;
     assert(serial);
     LOGD("Device serial: %s", serial);
+
+    // TCP/IP 连接自动应用低带宽优化参数（用户未手动指定时覆盖默认值）
+    if (sc_adb_device_get_type(serial) == SC_ADB_DEVICE_TYPE_TCPIP) {
+        LOGI("TCP/IP 连接，自动应用低带宽优化参数");
+        struct sc_server_params *p = &server->params;
+        if (p->video_codec == SC_CODEC_H264) {
+            p->video_codec = SC_CODEC_H265;
+        }
+        if (!p->video_bit_rate) {
+            p->video_bit_rate = 2000000; // 2 Mbps
+        }
+        if (!p->max_size) {
+            p->max_size = 1024;
+        }
+        if (!p->max_fps) {
+            p->max_fps = "30";
+        }
+        if (!p->repeat_frame_delay) {
+            p->repeat_frame_delay = "500";
+        }
+        if (p->clipboard_autosync) {
+            p->clipboard_autosync = false;
+        }
+        if (p->audio) {
+            p->audio = false;
+            LOGI("TCP/IP 模式已自动关闭音频");
+        }
+    }
 
     ok = push_server(&server->intr, serial);
     if (!ok) {
