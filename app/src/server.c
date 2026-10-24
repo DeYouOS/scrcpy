@@ -1236,6 +1236,18 @@ run_server(void *data) {
             p->repeat_frame_delay = "500";
         }
 
+        // 远程设备无人操作，保持唤醒防止 ColorOS/Doze 深度省电
+        // 冻结 server 进程导致连接莫名断开（表现为连接十几分钟后断开）
+        if (!p->stay_awake) {
+            p->stay_awake = true;
+            LOGI("TCP/IP 模式自动启用 stay_awake 防止设备休眠断连");
+        }
+        // 锁屏超时延长到 30 分钟（断开时自动恢复原值）
+        if (p->screen_off_timeout == -1) {
+            p->screen_off_timeout = SC_TICK_FROM_MS(30 * 60 * 1000);
+            LOGI("TCP/IP 模式自动延长锁屏超时到 30 分钟");
+        }
+
         // 直连 TCP 探测：从 serial 解析主机 IP，端口用 adb端口+1
         // 可通过环境变量 SCRCPY_NO_DIRECT_TCP=1 禁用（走 ADB 隧道）
         const char *no_direct = getenv("SCRCPY_NO_DIRECT_TCP");
