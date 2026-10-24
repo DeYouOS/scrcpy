@@ -6,6 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include "adb/adb.h"
 #include "adb/adb_device.h"
@@ -14,6 +17,7 @@
 #include "util/log.h"
 #include "util/net_intr.h"
 #include "util/process.h"
+#include "util/process_intr.h"
 #include "util/str.h"
 
 #define SC_SERVER_FILENAME "scrcpy-server"
@@ -68,6 +72,27 @@ push_server(struct sc_intr *intr, const char *serial) {
     bool ok = sc_adb_push(intr, serial, server_path, SC_DEVICE_SERVER_PATH, 0);
     free(server_path);
     return ok;
+}
+
+// 清理设备上残留的旧 server 进程和 dalvik 缓存：
+// - 残留进程会占用直连端口，导致新连接误连到旧会话（表现为黑屏/无画面）
+// - 旧 odex 缓存在 jar 被系统清理后可能被加载，导致运行老版本代码
+// 可设置环境变量 SCRCPY_NO_CLEAN_SERVER=1 跳过（如需多实例连同一设备）
+static void
+clean_stale_server(struct sc_intr *intr, const char *serial) {
+    const char *no_clean = getenv("SCRCPY_NO_CLEAN_SERVER");
+    if (no_clean && !strcmp(no_clean, "1")) {
+        return;
+    }
+
+    // 杀残留 scrcpy server（按 cmdline 精确匹配，不影响其他 app_process）
+    // pkill 无匹配时返回非 0，忽略返回码
+    sc_adb_shell_ignore_errors(intr, serial,
+                               "pkill -f com.genymobile.scrcpy");
+
+    // 清理旧 odex 缓存（防系统删 jar 后加载旧缓存代码）
+    sc_adb_shell_ignore_errors(intr, serial,
+                               "rm -rf /data/local/tmp/dalvik-cache");
 }
 
 static const char *
@@ -705,6 +730,18 @@ sc_server_connect_to(struct sc_server *server, struct sc_server_info *info) {
             (void) ok;
         }
 
+        // 直连链路可能经过 NPS/NAT 转发，开启 TCP keepalive
+        // 防止低流量时被中间层单方面断开
+        if (video_socket != SC_SOCKET_NONE) {
+            net_enable_tcp_keepalive(video_socket);
+        }
+        if (audio_socket != SC_SOCKET_NONE) {
+            net_enable_tcp_keepalive(audio_socket);
+        }
+        if (control_socket != SC_SOCKET_NONE) {
+            net_enable_tcp_keepalive(control_socket);
+        }
+
         if (direct_ok) {
             sc_socket first_socket = video ? video_socket
                                    : audio ? audio_socket
@@ -717,6 +754,21 @@ sc_server_connect_to(struct sc_server *server, struct sc_server_info *info) {
                 server->audio_socket = audio_socket;
                 server->control_socket = control_socket;
                 LOGI("Direct TCP connected");
+                // 诊断：打印各 socket 的本地端口，用于与服务端 accept 日志对照
+                struct sockaddr_in sa;
+                socklen_t len = sizeof(sa);
+                if (video_socket != SC_SOCKET_NONE
+                        && getsockname(video_socket, (struct sockaddr *) &sa,
+                                       &len) == 0) {
+                    LOGI("Direct TCP diag: video socket local port %d",
+                         (int) ntohs(sa.sin_port));
+                }
+                if (control_socket != SC_SOCKET_NONE
+                        && getsockname(control_socket, (struct sockaddr *) &sa,
+                                       &len) == 0) {
+                    LOGI("Direct TCP diag: control socket local port %d",
+                         (int) ntohs(sa.sin_port));
+                }
                 return true;
             }
         }
@@ -1184,22 +1236,30 @@ run_server(void *data) {
             p->repeat_frame_delay = "500";
         }
 
-        char host[256];
-        const char *colon = strrchr(serial, ':');
-        if (colon) {
-            size_t host_len = (size_t) (colon - serial);
-            if (host_len < sizeof(host)) {
-                memcpy(host, serial, host_len);
-                host[host_len] = '\0';
+        // 直连 TCP 探测：从 serial 解析主机 IP，端口用 adb端口+1
+        // 可通过环境变量 SCRCPY_NO_DIRECT_TCP=1 禁用（走 ADB 隧道）
+        const char *no_direct = getenv("SCRCPY_NO_DIRECT_TCP");
+        bool direct_enabled = !(no_direct && !strcmp(no_direct, "1"));
+        if (direct_enabled) {
+            char host[256];
+            const char *colon = strrchr(serial, ':');
+            if (colon) {
+                size_t host_len = (size_t) (colon - serial);
+                if (host_len < sizeof(host)) {
+                    memcpy(host, serial, host_len);
+                    host[host_len] = '\0';
 
-                if (net_parse_ipv4(host, &server->direct_tcp_host)) {
-                    char *endptr;
-                    unsigned long adb_port = strtoul(colon + 1, &endptr, 10);
-                    if (!*endptr && adb_port < 0xFFFF) {
-                        if (!p->direct_tcp_port) {
-                            p->direct_tcp_port = (uint16_t) (adb_port + 1);
+                    if (net_parse_ipv4(host, &server->direct_tcp_host)) {
+                        char *endptr;
+                        unsigned long adb_port =
+                            strtoul(colon + 1, &endptr, 10);
+                        if (!*endptr && adb_port < 0xFFFF) {
+                            if (!p->direct_tcp_port) {
+                                p->direct_tcp_port =
+                                    (uint16_t) (adb_port + 1);
+                            }
+                            server->direct_tcp_port = p->direct_tcp_port;
                         }
-                        server->direct_tcp_port = p->direct_tcp_port;
                     }
                 }
             }
@@ -1210,6 +1270,9 @@ run_server(void *data) {
             LOGI("TCP/IP 模式已自动关闭音频");
         }
     }
+
+    // 清理残留 server 进程和旧缓存，确保本次连接运行最新代码
+    clean_stale_server(&server->intr, serial);
 
     ok = push_server(&server->intr, serial);
     if (!ok) {

@@ -13,6 +13,7 @@
 #include "util/env.h"
 #include "util/file.h"
 #include "util/log.h"
+#include "util/process.h"
 #include "util/process_intr.h"
 #include "util/str.h"
 
@@ -245,6 +246,25 @@ sc_adb_kill_server(struct sc_intr *intr, unsigned flags) {
 
     sc_pid pid = sc_adb_execute(argv, flags);
     return process_check_success_intr(intr, pid, "adb kill-server", flags);
+}
+
+// 执行 adb shell 命令并等待完成（忽略返回码，命令失败不视为错误）
+bool
+sc_adb_shell_ignore_errors(struct sc_intr *intr, const char *serial,
+                           const char *cmd) {
+    (void) intr; // 预留：当前无需中断支持，静默等待即可
+    assert(serial);
+    const char *const argv[] =
+        SC_ADB_COMMAND("-s", serial, "shell", cmd);
+
+    sc_pid pid = sc_adb_execute(argv, SC_ADB_NO_STDOUT);
+    if (pid == SC_PROCESS_NONE) {
+        return false;
+    }
+    // 静默等待完成：pkill 无匹配、rm 目标不存在等返回非 0 属正常情况，
+    // 使用 sc_process_wait 而非 process_check_success_intr，避免打印误导性错误日志
+    sc_process_wait(pid, true);
+    return true;
 }
 
 bool

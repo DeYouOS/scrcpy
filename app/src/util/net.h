@@ -87,6 +87,11 @@ net_close(sc_socket socket);
 bool
 net_set_tcp_nodelay(sc_socket socket, bool tcp_nodelay);
 
+// 开启 TCP keepalive 并设置较激进的探测参数（空闲15s/间隔5s/3次），
+// 防止 NPS/NAT 等中间层因低流量掐掉长连接
+bool
+net_enable_tcp_keepalive(sc_socket socket);
+
 /**
  * Parse `ip` "xxx.xxx.xxx.xxx" to an IPv4 host representation
  */

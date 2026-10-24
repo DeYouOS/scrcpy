@@ -285,6 +285,51 @@ net_set_tcp_nodelay(sc_socket socket, bool tcp_nodelay) {
 }
 
 bool
+net_enable_tcp_keepalive(sc_socket socket) {
+    sc_raw_socket raw_sock = unwrap(socket);
+
+#ifdef _WIN32
+    // Windows: keepalive 默认 2 小时才发首包，改小需要 per-socket SIO_KEEPALIVE_VALS
+    // 简化处理，仅开启 keepalive
+    DWORD value = 1;
+    DWORD bytes_returned = 0;
+    int ret = WSAIoctl(raw_sock, SIO_KEEPALIVE_ON, &value, sizeof(value),
+                       NULL, 0, &bytes_returned, NULL, NULL);
+    if (ret == SOCKET_ERROR) {
+        net_perror("WSAIoctl(SIO_KEEPALIVE_ON)");
+        return false;
+    }
+    return true;
+#else
+    int value = 1;
+    int ret = setsockopt(raw_sock, SOL_SOCKET, SO_KEEPALIVE,
+                         (const void *) &value, sizeof(value));
+    if (ret == -1) {
+        net_perror("setsockopt(SO_KEEPALIVE)");
+        return false;
+    }
+# ifdef TCP_KEEPIDLE
+    // 空闲 15 秒后开始发 keepalive 探测，每 5 秒一次，3 次无响应判定断开
+    // 防止中间层（NPS/NAT）因低流量掐掉连接
+    value = 15;
+    setsockopt(raw_sock, IPPROTO_TCP, TCP_KEEPIDLE,
+               (const void *) &value, sizeof(value));
+# endif
+# ifdef TCP_KEEPINTVL
+    value = 5;
+    setsockopt(raw_sock, IPPROTO_TCP, TCP_KEEPINTVL,
+               (const void *) &value, sizeof(value));
+# endif
+# ifdef TCP_KEEPCNT
+    value = 3;
+    setsockopt(raw_sock, IPPROTO_TCP, TCP_KEEPCNT,
+               (const void *) &value, sizeof(value));
+# endif
+    return true;
+#endif
+}
+
+bool
 net_parse_ipv4(const char *s, uint32_t *ipv4) {
     struct in_addr addr;
     if (!inet_pton(AF_INET, s, &addr)) {
