@@ -1238,10 +1238,18 @@ run_server(void *data) {
 
         // 远程设备无人操作，保持唤醒防止 ColorOS/Doze 深度省电
         // 冻结 server 进程导致连接莫名断开（表现为连接十几分钟后断开）
+        // 注意 stay_awake 仅充电时生效，keep_active（周期 userActivity）不依赖充电
         if (!p->stay_awake) {
             p->stay_awake = true;
             LOGI("TCP/IP 模式自动启用 stay_awake 防止设备休眠断连");
         }
+        if (!p->keep_active) {
+            p->keep_active = true;
+            LOGI("TCP/IP 模式自动启用 keep_active（周期保活，不依赖充电）");
+        }
+        // 禁用 Doze 深度休眠（防止冻结后台进程；设备重启后自动恢复默认）
+        sc_adb_shell_ignore_errors(&server->intr, serial,
+                                   "dumpsys deviceidle disable");
         // 锁屏超时延长到 30 分钟（断开时自动恢复原值）
         if (p->screen_off_timeout == -1) {
             p->screen_off_timeout = SC_TICK_FROM_MS(30 * 60 * 1000);
