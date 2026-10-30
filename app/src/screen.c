@@ -59,7 +59,14 @@ sc_screen_on_stats(struct sc_fps_counter *counter,
                  fps, bitrate_str);
     }
 
-    sc_run_on_main_thread(sc_screen_update_stats_title, screen, false);
+    // 该回调可能由 fps_counter 线程触发，也可能由主线程的渲染路径
+    // （add_rendered_frame -> check_interval_expired）同步触发；
+    // sc_run_on_main_thread() 禁止主线程调用，需先判断线程
+    if (sc_thread_is_main()) {
+        sc_screen_update_stats_title(screen);
+    } else {
+        sc_run_on_main_thread(sc_screen_update_stats_title, screen, false);
+    }
 }
 
 #define DOWNCAST(SINK) container_of(SINK, struct sc_screen, frame_sink)
