@@ -4,6 +4,7 @@ src = [
     'src/adb/adb_device.c',
     'src/adb/adb_parser.c',
     'src/adb/adb_tunnel.c',
+    'src/adb/device_lock.c',
     'src/audio_player.c',
     'src/audio_regulator.c',
     'src/cli.c',

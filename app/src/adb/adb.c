@@ -10,6 +10,7 @@
 
 #include "adb/adb_device.h"
 #include "adb/adb_parser.h"
+#include "adb/device_lock.h"
 #include "util/env.h"
 #include "util/file.h"
 #include "util/log.h"
@@ -639,6 +640,42 @@ sc_adb_select_device(struct sc_intr *intr,
         return false;
     }
 
+    // 过滤掉已被其他 scrcpy 实例占用的设备
+    //
+    // 桌面图标每点击一次就会启动一个独立实例，若它们同时连到同一台设备，
+    // 会争抢设备端的 server 端口导致连接异常（甚至出现 100% CPU 空转）。
+    // 这里在展示选择列表之前就把已被占用的设备剔除，从源头避免冲突。
+    size_t available = 0;
+    for (size_t i = 0; i < vec.size; ++i) {
+        struct sc_adb_device *d = &vec.data[i];
+        if (!d->selected) {
+            continue;
+        }
+        if (sc_device_lock_is_busy(d->serial)) {
+            LOGI("设备 %s 已被其他 scrcpy 实例占用，跳过", d->serial);
+            d->selected = false;
+            continue;
+        }
+        if (!available) {
+            sel_idx = i;
+        }
+        ++available;
+    }
+
+    if (available == 0) {
+        if (selector->type == SC_ADB_DEVICE_SELECT_SERIAL) {
+            assert(selector->serial);
+            LOGE("设备 %s 已被其他 scrcpy 实例占用", selector->serial);
+        } else {
+            LOGE("所有 ADB 设备都已被其他 scrcpy 实例占用");
+            sc_adb_devices_log(SC_LOG_LEVEL_ERROR, vec.data, vec.size);
+        }
+        sc_adb_devices_destroy(&vec);
+        return false;
+    }
+
+    sel_count = available;
+
     if (sel_count > 1) {
         // 如果用户没有通过 --serial 指定设备，提供交互式选择
         // 需要终端支持（isatty），图标启动等非终端环境用 zenity 弹窗
@@ -829,6 +866,13 @@ sc_adb_select_device(struct sc_intr *intr,
 
     ok = sc_adb_device_check_state(device, vec.data, vec.size);
     if (!ok) {
+        sc_adb_devices_destroy(&vec);
+        return false;
+    }
+
+    // 占用该设备，防止其他 scrcpy 实例重复连接（锁随进程退出自动释放）
+    if (!sc_device_lock_acquire(device->serial)) {
+        LOGE("设备 %s 已被其他 scrcpy 实例占用", device->serial);
         sc_adb_devices_destroy(&vec);
         return false;
     }
