@@ -120,7 +120,25 @@ sdl_configure_ctrl_c_windows(void) {
 static enum scrcpy_exit_code
 event_loop(struct scrcpy *s, bool has_screen) {
     SDL_Event event;
+
+    // 事件风暴保护：正常情况下每秒事件量远低于该阈值（视频帧事件 +
+    // 少量输入事件）。若 X11/SDL 异常导致事件源失控（参见
+    // await_for_server() 的注释），主动失败退出而不是 100% CPU 空转。
+    unsigned window_events = 0;
+    sc_tick window_start = sc_tick_now();
+
     while (SDL_WaitEvent(&event)) {
+        if (++window_events >= 10000) {
+            sc_tick now = sc_tick_now();
+            if (now - window_start < SC_TICK_FROM_SEC(1)) {
+                LOGE("Event storm detected (%u events in less than 1s), aborting",
+                     window_events);
+                return SCRCPY_EXIT_FAILURE;
+            }
+            window_events = 0;
+            window_start = now;
+        }
+
         switch (event.type) {
             case SC_EVENT_DEVICE_DISCONNECTED:
                 LOGW("Device disconnected");
@@ -159,11 +177,38 @@ event_loop(struct scrcpy *s, bool has_screen) {
     return SCRCPY_EXIT_FAILURE;
 }
 
+// 等待 server 连接的最长时间（秒）
+#define SC_AWAIT_SERVER_TIMEOUT_SEC 60
+
 // Return true on success, false on error
 static bool
 await_for_server(bool *connected) {
     SDL_Event event;
-    while (SDL_WaitEvent(&event)) {
+
+    // 使用带超时的等待，而不是无限阻塞的 SDL_WaitEvent()。
+    //
+    // 生产环境出现过这种情况：X11 返回 BadAtom（X_GetAtomName）后，
+    // SC_EVENT_SERVER_CONNECTED 事件投递失败（SDL_PushEvent 返回 false，
+    // 且 SDL_GetError() 为空），主线程于是永远等不到该事件；同时 X11
+    // 事件源持续可读导致 SDL_WaitEvent() 立刻返回，主线程陷入忙循环，
+    // 进程以 100% CPU 空转且永不退出。
+    //
+    // 改为周期性等待 + 绝对超时后，即使事件投递失败或事件源异常，
+    // 也一定会在超时后退化为一次干净的失败退出。
+    sc_tick deadline = sc_tick_now() + SC_TICK_FROM_SEC(SC_AWAIT_SERVER_TIMEOUT_SEC);
+
+    while (true) {
+        if (sc_tick_now() >= deadline) {
+            LOGE("Timeout waiting for server connection (%d s)",
+                 SC_AWAIT_SERVER_TIMEOUT_SEC);
+            return false;
+        }
+
+        bool got_event = SDL_WaitEventTimeout(&event, 500);
+        if (!got_event) {
+            continue;
+        }
+
         switch (event.type) {
             case SDL_EVENT_QUIT:
                 if (connected) {
@@ -181,9 +226,6 @@ await_for_server(bool *connected) {
                 break;
         }
     }
-
-    LOGE("SDL_WaitEvent() error: %s", SDL_GetError());
-    return false;
 }
 
 static void

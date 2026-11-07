@@ -18,7 +18,11 @@ sc_push_event_impl(uint32_t type, void *ptr, const char *name) {
     };
     bool ok = SDL_PushEvent(&event);
     if (!ok) {
-        LOGE("Could not post %s event: %s", name, SDL_GetError());
+        const char *err = SDL_GetError();
+        // SDL_GetError() 可能为空（如队列已满或事件被过滤），此时补一个
+        // 明确的后备描述，避免日志出现 "Could not post X event: " 这种空内容
+        LOGE("Could not post %s event: %s", name,
+             (err && *err) ? err : "(unknown SDL error)");
         return false;
     }
 
